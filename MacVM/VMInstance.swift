@@ -5,10 +5,21 @@
 //  Created by Khaos Tian on 6/28/21.
 //
 
-import AVFoundation
 import Foundation
 import SwiftUI
 import Virtualization
+import AVFoundation
+
+extension CGDirectDisplayID  {
+    var displayMode: CGDisplayMode? { CGDisplayCopyDisplayMode(self) }
+    func allDisplayModes(options: CFDictionary? = nil) -> [CGDisplayMode] { CGDisplayCopyAllDisplayModes(self, options) as? [CGDisplayMode] ?? [] }
+}
+
+struct Display {
+    static var main: CGDirectDisplayID { CGMainDisplayID() }
+    static var mode: CGDisplayMode? { main.displayMode }
+    static func allModes(for directDisplayID: CGDirectDisplayID = main) -> [CGDisplayMode] { directDisplayID.allDisplayModes() }
+}
 
 class VMInstallationState: ObservableObject {
     
@@ -149,7 +160,30 @@ class VMInstance: NSObject, VZVirtualMachineDelegate {
         }
     }
     
+    // this was necessary to get microphone working
+    func checkForAuthorizationStatus() {
+        AVCaptureDevice.requestAccess(for: AVMediaType.video, completionHandler: {
+                granted in
+                if granted {
+                
+                } else {
+    
+                }
+            })
+        
+        AVCaptureDevice.requestAccess(for: AVMediaType.audio, completionHandler: {
+                granted in
+                if granted {
+                
+                } else {
+    
+                }
+            })
+    }
+    
     func start() {
+        checkForAuthorizationStatus();
+        
         guard let hardwareModelData = document?.content.hardwareModelData,
               let machineIdentifierData = document?.content.machineIdentifierData else {
               return
@@ -174,32 +208,7 @@ class VMInstance: NSObject, VZVirtualMachineDelegate {
             
             let vm = VZVirtualMachine(configuration: configuration, queue: .main)
             vm.delegate = self
-
-#if swift(>=5.7)
-            if #available(macOS 13.0, *) {
-                let options = VZMacOSVirtualMachineStartOptions()
-                options.startUpFromMacOSRecovery = document?.content.bootFromRecovery ?? false
-
-                vm.start(options: options) { [weak self] error in
-                    if let error = error {
-                        NSLog("Error: \(error)")
-                    } else {
-                        self?.document?.isRunning = true
-                        NSLog("Success")
-                    }
-                }
-            } else {
-                vm.start { [weak self] result in
-                    switch result {
-                    case .success:
-                        self?.document?.isRunning = true
-                        NSLog("Success")
-                    case .failure(let error):
-                        NSLog("Error: \(error)")
-                    }
-                }
-            }
-#else
+            
             vm.start { [weak self] result in
                 switch result {
                 case .success:
@@ -209,8 +218,7 @@ class VMInstance: NSObject, VZVirtualMachineDelegate {
                     NSLog("Error: \(error)")
                 }
             }
-#endif
-
+            
             self.virtualMachine = vm
         } catch {
             NSLog("Error: \(error)")
@@ -236,26 +244,18 @@ class VMInstance: NSObject, VZVirtualMachineDelegate {
         let networkDevice = VZVirtioNetworkDeviceConfiguration()
         networkDevice.attachment = VZNATNetworkDeviceAttachment()
         
+        let pW = Display.mode!.pixelWidth
+        let aW = Display.mode!.width
+        let ppi = Int((Double(pW) / Double(aW)) * 96)
+        
         let graphics = VZMacGraphicsDeviceConfiguration()
-        graphics.displays = {
-            if let mainScreen = NSScreen.main {
-                return [
-                    VZMacGraphicsDisplayConfiguration(
-                        widthInPixels: Int(mainScreen.frame.size.width * mainScreen.backingScaleFactor),
-                        heightInPixels: Int(mainScreen.frame.size.height * mainScreen.backingScaleFactor),
-                        pixelsPerInch: Int(mainScreen.backingScaleFactor * 110)
-                    )
-                ]
-            } else {
-                return [
-                    VZMacGraphicsDisplayConfiguration(
-                        widthInPixels: 2560,
-                        heightInPixels: 1600,
-                        pixelsPerInch: 220
-                    )
-                ]
-            }
-        }()
+        graphics.displays = [
+            VZMacGraphicsDisplayConfiguration(
+                widthInPixels: Int(Display.mode!.pixelWidth),
+                heightInPixels: Int(Display.mode!.pixelHeight),
+                pixelsPerInch: ppi
+            )
+        ]
         
         let keyboard = VZUSBKeyboardConfiguration()
         let pointingDevice = VZUSBScreenCoordinatePointingDeviceConfiguration()
@@ -273,15 +273,20 @@ class VMInstance: NSObject, VZVirtualMachineDelegate {
             NSLog("Storage Error: \(error)")
         }
 
-        let soundDevice = VZVirtioSoundDeviceConfiguration()
+        var soundDevices: [VZVirtioSoundDeviceConfiguration] = []
+        let inputSoundDevice = VZVirtioSoundDeviceConfiguration()
+        let outputSoundDevice = VZVirtioSoundDeviceConfiguration()
+        
         let outputStream = VZVirtioSoundDeviceOutputStreamConfiguration()
         outputStream.sink = VZHostAudioOutputStreamSink()
-        soundDevice.streams.append(outputStream)
-
-        AVCaptureDevice.requestAccess(for:  .audio) { _ in }
+        outputSoundDevice.streams.append(outputStream)
+        
         let inputStream = VZVirtioSoundDeviceInputStreamConfiguration()
         inputStream.source = VZHostAudioInputStreamSource()
-        soundDevice.streams.append(inputStream)
+        inputSoundDevice.streams.append(inputStream)
+        
+        soundDevices.append(inputSoundDevice)
+        soundDevices.append(outputSoundDevice)
 
         let configuration = VZVirtualMachineConfiguration()
         configuration.bootLoader = bootloader
@@ -306,7 +311,8 @@ class VMInstance: NSObject, VZVirtualMachineDelegate {
         configuration.keyboards = [keyboard]
         configuration.pointingDevices = [pointingDevice]
         configuration.storageDevices = storages
-        configuration.audioDevices = [soundDevice]
+        configuration.audioDevices = soundDevices
+        
         return configuration
     }
     
